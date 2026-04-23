@@ -6,11 +6,38 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
+
+func processMessage(client *sqs.Client, queueURL *string, stages []Stage, msg sqstypes.Message) error {
+	var payload Message
+	if err := json.Unmarshal([]byte(*msg.Body), &payload); err != nil {
+		return err
+	}
+
+	for _, s := range stages {
+		if err := s.Setup(); err != nil {
+			return err
+		}
+		if err := s.Process(&payload); err != nil {
+			return err
+		}
+		if err := s.Teardown(); err != nil {
+			return err
+		}
+	}
+
+	_, err := client.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{
+		QueueUrl:      queueURL,
+		ReceiptHandle: msg.ReceiptHandle,
+	})
+	return err
+}
 
 type Message struct {
 	Message string `json:"message"`
@@ -82,32 +109,16 @@ func main() {
 			continue
 		}
 
+		var wg sync.WaitGroup
 		for _, msg := range out.Messages {
-			var payload Message
-			if err := json.Unmarshal([]byte(*msg.Body), &payload); err != nil {
-				log.Printf("failed to deserialize message %s: %v", *msg.MessageId, err)
-			} else {
-				for _, s := range stages {
-					if err := s.Setup(); err != nil {
-						log.Printf("stage setup failed for message %s: %v", *msg.MessageId, err)
-						continue
-					}
-					if err := s.Process(&payload); err != nil {
-						log.Printf("stage process failed for message %s: %v", *msg.MessageId, err)
-					}
-					if err := s.Teardown(); err != nil {
-						log.Printf("stage teardown failed for message %s: %v", *msg.MessageId, err)
-					}
+			wg.Add(1)
+			go func(msg sqstypes.Message) {
+				defer wg.Done()
+				if err := processMessage(client, queueURL, stages, msg); err != nil {
+					log.Printf("message %s left on queue: %v", *msg.MessageId, err)
 				}
-			}
-
-			_, err := client.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{
-				QueueUrl:      queueURL,
-				ReceiptHandle: msg.ReceiptHandle,
-			})
-			if err != nil {
-				log.Printf("error deleting message %s: %v", *msg.MessageId, err)
-			}
+			}(msg)
 		}
+		wg.Wait()
 	}
 }

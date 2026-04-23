@@ -1,0 +1,33 @@
+services:
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      # Normally wouldn't commit secrets, but in the interest of allowing others to run this...
+      - LOCALSTACK_AUTH_TOKEN=ls-qopAVazo-3352-WEyu-nEqU-DUWAdOsuf48e
+    volumes:
+      - "./init-scripts:/etc/localstack/init/ready.d"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "awslocal", "sqs", "list-queues"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  daemon:
+    build: .
+    env_file:
+      - daemon.env
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - SQS_ENDPOINT=http://localstack:4566
+    depends_on:
+      localstack:
+        condition: service_healthy

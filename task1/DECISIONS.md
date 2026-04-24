@@ -46,3 +46,5 @@ DECISIONS.md in the repo root covering: your key architectural choices and which
     - This is a false positive. Under a real system, the scoring rules are dynamic per league, and would need to be fetched at process time. That said, the majority of the leagues would be using default settings (or one of a few defaults), so those could be a candidate to load into memory.
   - DB connection pooling
     - This is a big one as we wouldn't want to wait on db connections while we process; can just re-use open ones.
+
+- Used Claude to generate unit tests for the stages file. Did okay with non-database specific ones. For the stage that writes to postgres, I'd recommend a more robust integration test suite that actually verifies the records are correctly written, and clean up afterwards. We're not getting much value out of unit testing as is, since the stage is essentially a data persistence layer for writing to the database. We'd want to ensure the correct records are written.

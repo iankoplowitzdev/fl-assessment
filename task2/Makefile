@@ -4,5 +4,5 @@ cycle:
 	docker compose down && docker volume prune --force && docker compose up
 
 run:
-	bash scripts/send-message.sh
+	go run .
 

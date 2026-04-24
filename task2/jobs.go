@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ses"
 	sestypes "github.com/aws/aws-sdk-go-v2/service/ses/types"
+	"github.com/jackc/pgx/v5"
 )
 
 // ─── Status ───────────────────────────────────────────────────────────────────
@@ -333,4 +334,56 @@ func formatEmailBody(r TransformerResult) string {
 		}
 	}
 	return buf.String()
+}
+
+// ─── Postgres Writer Job ──────────────────────────────────────────────────────
+
+type PostgresWriterJob struct {
+	BaseJob
+	dsn string
+}
+
+func newPostgresWriterJob(id, dsn string, retry RetryConfig) *PostgresWriterJob {
+	return &PostgresWriterJob{
+		BaseJob: BaseJob{id: id, status: Pending, retryPolicy: retry},
+		dsn:     dsn,
+	}
+}
+
+func (j *PostgresWriterJob) Run(ctx context.Context, input any) (any, error) {
+	j.setStatus(Running)
+
+	result, ok := input.(TransformerResult)
+	if !ok {
+		j.setStatus(Failed)
+		return nil, fmt.Errorf("expected TransformerResult input, got %T", input)
+	}
+
+	conn, err := pgx.Connect(ctx, j.dsn)
+	if err != nil {
+		j.setStatus(Failed)
+		return nil, fmt.Errorf("connect to postgres: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	for _, game := range result.Games {
+		for _, p := range game.Players {
+			_, err := conn.Exec(ctx, `
+				INSERT INTO fantasy_results
+					(week, season, game_id, home_team, away_team, player_name, player_team, position, points)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+				result.Week, result.Season,
+				game.GameID, game.HomeTeam, game.AwayTeam,
+				p.Name, p.Team, p.Position, p.Points,
+			)
+			if err != nil {
+				j.setStatus(Failed)
+				return nil, fmt.Errorf("insert player %s: %w", p.Name, err)
+			}
+		}
+	}
+
+	log.Printf("[postgres_writer] wrote %d games (week %d, season %d)", len(result.Games), result.Week, result.Season)
+	j.setStatus(Succeeded)
+	return nil, nil
 }

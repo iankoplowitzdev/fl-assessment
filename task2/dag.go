@@ -77,38 +77,93 @@ func (d *DAG) topologicalSort() ([]string, error) {
 	return order, nil
 }
 
-// Run executes jobs in topological order. A job is only started if every one
-// of its declared dependencies has succeeded; otherwise it is cancelled.
+type jobResult struct {
+	id     string
+	output any
+	err    error
+}
+
+// Run executes the DAG, launching each job as a goroutine the moment all of
+// its dependencies have succeeded. Jobs whose dependencies fail are cancelled.
+// Independent jobs run concurrently.
 func (d *DAG) Run(ctx context.Context) error {
 	d.bus.Publish(Event{Type: EventWorkflowStarted, WorkflowName: d.name})
 
-	order, err := d.topologicalSort()
-	if err != nil {
-		return fmt.Errorf("topological sort: %w", err)
+	if _, err := d.topologicalSort(); err != nil {
+		return fmt.Errorf("invalid DAG: %w", err)
+	}
+
+	// Build reverse adjacency and pending dep counts.
+	dependents := make(map[string][]string, len(d.jobs))
+	pending := make(map[string]int, len(d.jobs))
+	for id, deps := range d.deps {
+		pending[id] = len(deps)
+		for _, dep := range deps {
+			dependents[dep] = append(dependents[dep], id)
+		}
 	}
 
 	succeeded := make(map[string]bool, len(d.jobs))
-	anyFailed := false
+	results := make(chan jobResult, len(d.jobs))
+	running := 0
 
-	for _, id := range order {
-		if !d.depsSucceeded(id, succeeded) {
-			d.jobs[id].Cancel()
-			d.bus.Publish(Event{Type: EventJobCancelled, JobID: id})
-			continue
-		}
-
-		job := d.jobs[id]
+	// launch starts a job goroutine. Input is captured before the goroutine
+	// starts so all dependency outputs are guaranteed visible.
+	launch := func(id string) {
 		input := d.collectInput(id)
+		job := d.jobs[id]
 		d.bus.Publish(Event{Type: EventJobStarted, JobID: id})
-		output, err := d.runWithRetry(ctx, job, input)
-		if err != nil {
-			d.bus.Publish(Event{Type: EventJobFailed, JobID: id, Err: err})
-			anyFailed = true
-			continue
+		running++
+		go func() {
+			output, err := d.runWithRetry(ctx, job, input)
+			results <- jobResult{id: id, output: output, err: err}
+		}()
+	}
+
+	// cancelTree cancels id and all of its transitive dependents.
+	var cancelTree func(id string)
+	cancelTree = func(id string) {
+		d.jobs[id].Cancel()
+		d.bus.Publish(Event{Type: EventJobCancelled, JobID: id})
+		for _, dep := range dependents[id] {
+			pending[dep]--
+			if pending[dep] == 0 {
+				cancelTree(dep)
+			}
 		}
-		d.outputs[id] = output
-		succeeded[id] = true
-		d.bus.Publish(Event{Type: EventJobSucceeded, JobID: id})
+	}
+
+	// Seed: launch jobs that have no dependencies.
+	for id, n := range pending {
+		if n == 0 {
+			launch(id)
+		}
+	}
+
+	anyFailed := false
+	for running > 0 {
+		r := <-results
+		running--
+
+		if r.err != nil {
+			anyFailed = true
+			d.bus.Publish(Event{Type: EventJobFailed, JobID: r.id, Err: r.err})
+		} else {
+			succeeded[r.id] = true
+			d.outputs[r.id] = r.output
+			d.bus.Publish(Event{Type: EventJobSucceeded, JobID: r.id})
+		}
+
+		for _, dep := range dependents[r.id] {
+			pending[dep]--
+			if pending[dep] == 0 {
+				if d.depsSucceeded(dep, succeeded) {
+					launch(dep)
+				} else {
+					cancelTree(dep)
+				}
+			}
+		}
 	}
 
 	var runErr error

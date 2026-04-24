@@ -14,11 +14,16 @@ import (
 )
 
 type WorkflowConfig struct {
-	Workflow     WorkflowMeta     `json:"workflow"`
-	Jobs         []JobConfig      `json:"jobs"`
-	Scoring      ScoringConfig    `json:"scoring"`
-	Users        []User           `json:"users"`
+	Workflow     WorkflowMeta       `json:"workflow"`
+	Jobs         []JobConfig        `json:"jobs"`
+	Scoring      ScoringConfig      `json:"scoring"`
+	Users        []User             `json:"users"`
 	EmailService EmailServiceConfig `json:"email_service"`
+	Database     DatabaseConfig     `json:"database"`
+}
+
+type DatabaseConfig struct {
+	DSN string `json:"dsn"`
 }
 
 type WorkflowMeta struct {
@@ -61,6 +66,7 @@ type JobDeps struct {
 	Users       []User
 	SESClient   *ses.Client
 	FromAddress string
+	DatabaseDSN string
 }
 
 func loadConfig(path string) (*WorkflowConfig, error) {
@@ -108,6 +114,8 @@ func buildJob(cfg JobConfig, deps JobDeps) (Job, error) {
 		return newStatTransformerJob(cfg.ID, deps.Scoring, cfg.Retry), nil
 	case "emailer":
 		return newEmailJob(cfg.ID, deps.Users, deps.SESClient, deps.FromAddress, cfg.Retry), nil
+	case "postgres_writer":
+		return newPostgresWriterJob(cfg.ID, deps.DatabaseDSN, cfg.Retry), nil
 	default:
 		return nil, fmt.Errorf("unknown job type: %q", cfg.Type)
 	}
@@ -149,6 +157,7 @@ func main() {
 		Users:       cfg.Users,
 		SESClient:   sesClient,
 		FromAddress: cfg.EmailService.FromAddress,
+		DatabaseDSN: cfg.Database.DSN,
 	}
 
 	dag := NewDAG(cfg.Workflow.Name, bus)

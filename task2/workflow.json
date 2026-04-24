@@ -32,6 +32,16 @@
       "retry": {
         "enabled": false
       }
+    },
+    {
+      "id": "postgres_writer",
+      "type": "postgres_writer",
+      "dependencies": ["stat_transformer"],
+      "retry": {
+        "enabled": true,
+        "max_attempts": 3,
+        "backoff_scalar": 2.0
+      }
     }
   ],
   "scoring": {
@@ -52,5 +62,8 @@
     "from_address": "noreply@tmrw.example.com",
     "ses_endpoint": "http://localhost:4566",
     "region":       "us-east-1"
+  },
+  "database": {
+    "dsn": "postgres://tmrw:tmrw@localhost:5432/tmrw?sslmode=disable"
   }
 }

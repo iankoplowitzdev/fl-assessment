@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"math"
+	"time"
 )
 
 type DAG struct {
@@ -74,7 +77,8 @@ func (d *DAG) topologicalSort() ([]string, error) {
 	return order, nil
 }
 
-// Run executes jobs in topological order, cancelling downstream jobs on failure.
+// Run executes jobs in topological order. A job is only started if every one
+// of its declared dependencies has succeeded; otherwise it is cancelled.
 func (d *DAG) Run(ctx context.Context) error {
 	d.bus.Publish(Event{Type: EventWorkflowStarted, WorkflowName: d.name})
 
@@ -83,37 +87,79 @@ func (d *DAG) Run(ctx context.Context) error {
 		return fmt.Errorf("topological sort: %w", err)
 	}
 
-	failed := false
+	succeeded := make(map[string]bool, len(d.jobs))
+	anyFailed := false
 
 	for _, id := range order {
-		job := d.jobs[id]
-
-		if failed {
-			job.Cancel()
+		if !d.depsSucceeded(id, succeeded) {
+			d.jobs[id].Cancel()
 			d.bus.Publish(Event{Type: EventJobCancelled, JobID: id})
 			continue
 		}
 
+		job := d.jobs[id]
 		input := d.collectInput(id)
-
 		d.bus.Publish(Event{Type: EventJobStarted, JobID: id})
-		output, err := job.Run(ctx, input)
+		output, err := d.runWithRetry(ctx, job, input)
 		if err != nil {
 			d.bus.Publish(Event{Type: EventJobFailed, JobID: id, Err: err})
-			failed = true
+			anyFailed = true
 			continue
 		}
-
 		d.outputs[id] = output
+		succeeded[id] = true
 		d.bus.Publish(Event{Type: EventJobSucceeded, JobID: id})
 	}
 
 	var runErr error
-	if failed {
+	if anyFailed {
 		runErr = fmt.Errorf("one or more jobs failed")
 	}
 	d.bus.Publish(Event{Type: EventWorkflowDone, WorkflowName: d.name, Err: runErr})
 	return runErr
+}
+
+func (d *DAG) runWithRetry(ctx context.Context, job Job, input any) (any, error) {
+	policy := job.RetryPolicy()
+	maxAttempts := 1
+	if policy.Enabled && policy.MaxAttempts > 1 {
+		maxAttempts = policy.MaxAttempts
+	}
+	scalar := policy.BackoffScalar
+	if scalar <= 0 {
+		scalar = 2.0
+	}
+
+	var (
+		output any
+		err    error
+	)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		output, err = job.Run(ctx, input)
+		if err == nil {
+			return output, nil
+		}
+		if attempt < maxAttempts-1 {
+			delay := time.Duration(math.Pow(scalar, float64(attempt))) * time.Second
+			log.Printf("[dag] job %q attempt %d/%d failed, retrying in %v: %v",
+				job.ID(), attempt+1, maxAttempts, delay, err)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+	return nil, err
+}
+
+func (d *DAG) depsSucceeded(id string, succeeded map[string]bool) bool {
+	for _, dep := range d.deps[id] {
+		if !succeeded[dep] {
+			return false
+		}
+	}
+	return true
 }
 
 // collectInput gathers dependency outputs for a job.

@@ -27,10 +27,11 @@ type WorkflowMeta struct {
 }
 
 type JobConfig struct {
-	ID           string   `json:"id"`
-	Type         string   `json:"type"`
-	URL          string   `json:"url,omitempty"`
-	Dependencies []string `json:"dependencies"`
+	ID           string      `json:"id"`
+	Type         string      `json:"type"`
+	URL          string      `json:"url,omitempty"`
+	Dependencies []string    `json:"dependencies"`
+	Retry        RetryConfig `json:"retry"`
 }
 
 type ScoringConfig struct {
@@ -102,11 +103,11 @@ func envOrDefault(key, def string) string {
 func buildJob(cfg JobConfig, deps JobDeps) (Job, error) {
 	switch cfg.Type {
 	case "http_get":
-		return newHTTPGetJob(cfg.ID, cfg.URL), nil
+		return newHTTPGetJob(cfg.ID, cfg.URL, cfg.Retry), nil
 	case "stat_transformer":
-		return newStatTransformerJob(cfg.ID, deps.Scoring), nil
+		return newStatTransformerJob(cfg.ID, deps.Scoring, cfg.Retry), nil
 	case "emailer":
-		return newEmailJob(cfg.ID, deps.Users, deps.SESClient, deps.FromAddress), nil
+		return newEmailJob(cfg.ID, deps.Users, deps.SESClient, deps.FromAddress, cfg.Retry), nil
 	default:
 		return nil, fmt.Errorf("unknown job type: %q", cfg.Type)
 	}

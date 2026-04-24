@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time" // used by HTTPGetJob exponential backoff
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ses"
@@ -30,6 +30,14 @@ const (
 	Cancelled Status = "CANCELLED"
 )
 
+// ─── Retry ────────────────────────────────────────────────────────────────────
+
+type RetryConfig struct {
+	Enabled       bool    `json:"enabled"`
+	MaxAttempts   int     `json:"max_attempts"`
+	BackoffScalar float64 `json:"backoff_scalar"`
+}
+
 // ─── Job interface ────────────────────────────────────────────────────────────
 
 type Job interface {
@@ -37,14 +45,16 @@ type Job interface {
 	Run(ctx context.Context, input any) (any, error)
 	GetStatus() Status
 	Cancel()
+	RetryPolicy() RetryConfig
 }
 
 // ─── BaseJob ──────────────────────────────────────────────────────────────────
 
 type BaseJob struct {
-	id     string
-	status Status
-	mu     sync.RWMutex
+	id          string
+	status      Status
+	retryPolicy RetryConfig
+	mu          sync.RWMutex
 }
 
 func (b *BaseJob) ID() string { return b.id }
@@ -62,6 +72,8 @@ func (b *BaseJob) setStatus(s Status) {
 }
 
 func (b *BaseJob) Cancel() { b.setStatus(Cancelled) }
+
+func (b *BaseJob) RetryPolicy() RetryConfig { return b.retryPolicy }
 
 // ─── NFL data types ───────────────────────────────────────────────────────────
 
@@ -126,39 +138,23 @@ type HTTPGetJob struct {
 	client *http.Client
 }
 
-func newHTTPGetJob(id, url string) *HTTPGetJob {
+func newHTTPGetJob(id, url string, retry RetryConfig) *HTTPGetJob {
 	return &HTTPGetJob{
-		BaseJob: BaseJob{id: id, status: Pending},
+		BaseJob: BaseJob{id: id, status: Pending, retryPolicy: retry},
 		url:     url,
 		client:  &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
-// Run fetches the URL, retrying with exponential backoff on any failure.
 func (j *HTTPGetJob) Run(ctx context.Context, _ any) (any, error) {
 	j.setStatus(Running)
-
-	const maxBackoff = 30 * time.Second
-	for attempt := 0; ; attempt++ {
-		data, err := j.fetch(ctx)
-		if err == nil {
-			j.setStatus(Succeeded)
-			return data, nil
-		}
-
-		backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
-		log.Printf("[http_get] Attempt %d failed: %v — retrying in %v", attempt+1, err, backoff)
-
-		select {
-		case <-ctx.Done():
-			j.setStatus(Failed)
-			return nil, fmt.Errorf("context cancelled during retry: %w", ctx.Err())
-		case <-time.After(backoff):
-		}
+	data, err := j.fetch(ctx)
+	if err != nil {
+		j.setStatus(Failed)
+		return nil, err
 	}
+	j.setStatus(Succeeded)
+	return data, nil
 }
 
 func (j *HTTPGetJob) fetch(ctx context.Context) ([]byte, error) {
@@ -184,9 +180,9 @@ type StatTransformerJob struct {
 	scoring ScoringConfig
 }
 
-func newStatTransformerJob(id string, scoring ScoringConfig) *StatTransformerJob {
+func newStatTransformerJob(id string, scoring ScoringConfig, retry RetryConfig) *StatTransformerJob {
 	return &StatTransformerJob{
-		BaseJob: BaseJob{id: id, status: Pending},
+		BaseJob: BaseJob{id: id, status: Pending, retryPolicy: retry},
 		scoring: scoring,
 	}
 }
@@ -257,9 +253,9 @@ type EmailJob struct {
 	fromAddress string
 }
 
-func newEmailJob(id string, users []User, sesClient *ses.Client, fromAddress string) *EmailJob {
+func newEmailJob(id string, users []User, sesClient *ses.Client, fromAddress string, retry RetryConfig) *EmailJob {
 	return &EmailJob{
-		BaseJob:     BaseJob{id: id, status: Pending},
+		BaseJob:     BaseJob{id: id, status: Pending, retryPolicy: retry},
 		users:       users,
 		sesClient:   sesClient,
 		fromAddress: fromAddress,

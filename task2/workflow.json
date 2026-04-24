@@ -8,17 +8,30 @@
       "id": "http_get",
       "type": "http_get",
       "url": "http://localhost:8081/nfl_scores.json",
-      "dependencies": []
+      "dependencies": [],
+      "retry": {
+        "enabled": true,
+        "max_attempts": 5,
+        "backoff_scalar": 2.0
+      }
     },
     {
       "id": "stat_transformer",
       "type": "stat_transformer",
-      "dependencies": ["http_get"]
+      "dependencies": ["http_get"],
+      "retry": {
+        "enabled": true,
+        "max_attempts": 3,
+        "backoff_scalar": 2.0
+      }
     },
     {
       "id": "emailer",
       "type": "emailer",
-      "dependencies": ["stat_transformer"]
+      "dependencies": ["stat_transformer"],
+      "retry": {
+        "enabled": false
+      }
     }
   ],
   "scoring": {

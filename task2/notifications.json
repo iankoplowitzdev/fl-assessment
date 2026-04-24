@@ -1,0 +1,10 @@
+{
+  "emails": [
+    "admin@example.com",
+    "ops-team@example.com"
+  ],
+  "webhooks": [
+    "http://localhost:9001/workflow/complete",
+    "http://localhost:9002/workflow/complete"
+  ]
+}

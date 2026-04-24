@@ -114,8 +114,12 @@ func buildJob(cfg JobConfig, deps JobDeps) (Job, error) {
 
 func main() {
 	configPath := "workflow.json"
+	notifyPath := "notifications.json"
 	if len(os.Args) > 1 {
 		configPath = os.Args[1]
+	}
+	if len(os.Args) > 2 {
+		notifyPath = os.Args[2]
 	}
 
 	ctx := context.Background()
@@ -124,12 +128,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
-	log.Printf("Starting workflow: %s — %s", cfg.Workflow.Name, cfg.Workflow.Description)
+
+	bus := &EventBus{}
+	bus.Subscribe(NewLoggerSubscriber(log.Default()))
 
 	sesClient, err := setupSES(ctx, cfg.EmailService)
 	if err != nil {
 		log.Fatalf("setup SES: %v", err)
 	}
+
+	notifyCfg, err := loadNotificationConfig(notifyPath)
+	if err != nil {
+		log.Fatalf("load notification config: %v", err)
+	}
+	bus.Subscribe(NewNotificationSubscriber(*notifyCfg, sesClient, cfg.EmailService.FromAddress))
 
 	deps := JobDeps{
 		Scoring:     cfg.Scoring,
@@ -138,7 +150,7 @@ func main() {
 		FromAddress: cfg.EmailService.FromAddress,
 	}
 
-	dag := NewDAG()
+	dag := NewDAG(cfg.Workflow.Name, bus)
 	for _, jobCfg := range cfg.Jobs {
 		job, err := buildJob(jobCfg, deps)
 		if err != nil {
@@ -150,6 +162,4 @@ func main() {
 	if err := dag.Run(ctx); err != nil {
 		log.Fatalf("workflow failed: %v", err)
 	}
-
-	log.Printf("Workflow %q completed successfully", cfg.Workflow.Name)
 }

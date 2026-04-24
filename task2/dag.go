@@ -3,20 +3,23 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 )
 
 type DAG struct {
+	name    string
 	jobs    map[string]Job
 	deps    map[string][]string
 	outputs map[string]any
+	bus     *EventBus
 }
 
-func NewDAG() *DAG {
+func NewDAG(name string, bus *EventBus) *DAG {
 	return &DAG{
+		name:    name,
 		jobs:    make(map[string]Job),
 		deps:    make(map[string][]string),
 		outputs: make(map[string]any),
+		bus:     bus,
 	}
 }
 
@@ -73,6 +76,8 @@ func (d *DAG) topologicalSort() ([]string, error) {
 
 // Run executes jobs in topological order, cancelling downstream jobs on failure.
 func (d *DAG) Run(ctx context.Context) error {
+	d.bus.Publish(Event{Type: EventWorkflowStarted, WorkflowName: d.name})
+
 	order, err := d.topologicalSort()
 	if err != nil {
 		return fmt.Errorf("topological sort: %w", err)
@@ -85,28 +90,30 @@ func (d *DAG) Run(ctx context.Context) error {
 
 		if failed {
 			job.Cancel()
-			log.Printf("[DAG] Job %q → CANCELLED (upstream failure)", id)
+			d.bus.Publish(Event{Type: EventJobCancelled, JobID: id})
 			continue
 		}
 
 		input := d.collectInput(id)
 
-		log.Printf("[DAG] Job %q → RUNNING", id)
+		d.bus.Publish(Event{Type: EventJobStarted, JobID: id})
 		output, err := job.Run(ctx, input)
 		if err != nil {
-			log.Printf("[DAG] Job %q → FAILED: %v", id, err)
+			d.bus.Publish(Event{Type: EventJobFailed, JobID: id, Err: err})
 			failed = true
 			continue
 		}
 
 		d.outputs[id] = output
-		log.Printf("[DAG] Job %q → %s", id, job.GetStatus())
+		d.bus.Publish(Event{Type: EventJobSucceeded, JobID: id})
 	}
 
+	var runErr error
 	if failed {
-		return fmt.Errorf("one or more jobs failed")
+		runErr = fmt.Errorf("one or more jobs failed")
 	}
-	return nil
+	d.bus.Publish(Event{Type: EventWorkflowDone, WorkflowName: d.name, Err: runErr})
+	return runErr
 }
 
 // collectInput gathers dependency outputs for a job.

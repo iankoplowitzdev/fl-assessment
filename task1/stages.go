@@ -1,25 +1,26 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
 )
 
 type Stage interface {
-	Setup() error
-	Process(msg *Message) error
-	Teardown() error
+	Setup(ctx context.Context) error
+	Process(ctx context.Context, msg *Message) error
+	Teardown(ctx context.Context) error
 }
 
 type SchemaValidationStage struct{}
 
-func (s *SchemaValidationStage) Setup() error {
+func (s *SchemaValidationStage) Setup(ctx context.Context) error {
 	log.Println("SchemaValidationStage: setup")
 	return nil
 }
 
-func (s *SchemaValidationStage) Process(msg *Message) error {
+func (s *SchemaValidationStage) Process(ctx context.Context, msg *Message) error {
 	if msg.GameID == "" {
 		return fmt.Errorf("missing game_id")
 	}
@@ -46,7 +47,7 @@ func (s *SchemaValidationStage) Process(msg *Message) error {
 	return nil
 }
 
-func (s *SchemaValidationStage) Teardown() error {
+func (s *SchemaValidationStage) Teardown(ctx context.Context) error {
 	log.Println("SchemaValidationStage: teardown")
 	return nil
 }
@@ -60,12 +61,12 @@ type FantasyPointTranslationStage struct {
 	rules map[string]scoringRule
 }
 
-func (s *FantasyPointTranslationStage) Setup() error {
+func (s *FantasyPointTranslationStage) Setup(ctx context.Context) error {
 	log.Println("FantasyPointTranslationStage: setup")
 	return nil
 }
 
-func (s *FantasyPointTranslationStage) Process(msg *Message) error {
+func (s *FantasyPointTranslationStage) Process(ctx context.Context, msg *Message) error {
 	rule, ok := s.rules[msg.StatType]
 	if !ok {
 		return fmt.Errorf("no scoring rule for stat_type %q", msg.StatType)
@@ -82,7 +83,7 @@ func (s *FantasyPointTranslationStage) Process(msg *Message) error {
 	return nil
 }
 
-func (s *FantasyPointTranslationStage) Teardown() error {
+func (s *FantasyPointTranslationStage) Teardown(ctx context.Context) error {
 	log.Println("FantasyPointTranslationStage: teardown")
 	return nil
 }
@@ -91,19 +92,19 @@ type DatabasePersistenceStage struct {
 	db *sql.DB
 }
 
-func (s *DatabasePersistenceStage) Setup() error {
+func (s *DatabasePersistenceStage) Setup(ctx context.Context) error {
 	log.Println("DatabasePersistenceStage: setup")
 	return nil
 }
 
-func (s *DatabasePersistenceStage) Process(msg *Message) error {
+func (s *DatabasePersistenceStage) Process(ctx context.Context, msg *Message) error {
 	var secondaryName, secondaryPosition sql.NullString
 	if msg.SecondaryPlayer != nil {
 		secondaryName = sql.NullString{String: msg.SecondaryPlayer.Name, Valid: true}
 		secondaryPosition = sql.NullString{String: msg.SecondaryPlayer.Position, Valid: true}
 	}
 
-	result, err := s.db.Exec(`
+	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO game_plays (
 			sqs_message_id,
 			game_id,
@@ -135,7 +136,7 @@ func (s *DatabasePersistenceStage) Process(msg *Message) error {
 	return nil
 }
 
-func (s *DatabasePersistenceStage) Teardown() error {
+func (s *DatabasePersistenceStage) Teardown(ctx context.Context) error {
 	log.Println("DatabasePersistenceStage: teardown")
 	return nil
 }

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -40,7 +42,7 @@ type Message struct {
 	FantasyPoints   float64   `json:"-"`
 }
 
-func processMessage(client *sqs.Client, queueURL *string, stages []Stage, msg sqstypes.Message) error {
+func processMessage(ctx context.Context, client *sqs.Client, queueURL *string, stages []Stage, msg sqstypes.Message) error {
 	var payload Message
 	if err := json.Unmarshal([]byte(*msg.Body), &payload); err != nil {
 		return err
@@ -48,26 +50,26 @@ func processMessage(client *sqs.Client, queueURL *string, stages []Stage, msg sq
 	payload.SQSMessageID = *msg.MessageId
 
 	for _, s := range stages {
-		if err := s.Setup(); err != nil {
+		if err := s.Setup(ctx); err != nil {
 			return err
 		}
-		if err := s.Process(&payload); err != nil {
+		if err := s.Process(ctx, &payload); err != nil {
 			return err
 		}
-		if err := s.Teardown(); err != nil {
+		if err := s.Teardown(ctx); err != nil {
 			return err
 		}
 	}
 
-	_, err := client.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{
+	_, err := client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      queueURL,
 		ReceiptHandle: msg.ReceiptHandle,
 	})
 	return err
 }
 
-func loadScoringRules(db *sql.DB) map[string]scoringRule {
-	rows, err := db.Query(`SELECT stat_type, points_per_yard, touchdown_points FROM stat_scoring_rules`)
+func loadScoringRules(ctx context.Context, db *sql.DB) map[string]scoringRule {
+	rows, err := db.QueryContext(ctx, `SELECT stat_type, points_per_yard, touchdown_points FROM stat_scoring_rules`)
 	if err != nil {
 		log.Fatalf("failed to load scoring rules: %v", err)
 	}
@@ -89,8 +91,8 @@ func loadScoringRules(db *sql.DB) map[string]scoringRule {
 	return rules
 }
 
-func buildStageRegistry(db *sql.DB) map[string]Stage {
-	rules := loadScoringRules(db)
+func buildStageRegistry(ctx context.Context, db *sql.DB) map[string]Stage {
+	rules := loadScoringRules(ctx, db)
 	return map[string]Stage{
 		"SCHEMA_VALIDATION":         &SchemaValidationStage{},
 		"FANTASY_POINT_TRANSLATION": &FantasyPointTranslationStage{rules: rules},
@@ -162,6 +164,9 @@ func connectDB() *sql.DB {
 }
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	endpoint := os.Getenv("SQS_ENDPOINT")
 	if endpoint == "" {
 		endpoint = "http://localhost:4566"
@@ -174,10 +179,10 @@ func main() {
 	db := connectDB()
 	defer db.Close()
 
-	registry := buildStageRegistry(db)
+	registry := buildStageRegistry(ctx, db)
 	stages := loadStages(registry)
 
-	cfg, err := config.LoadDefaultConfig(context.Background(),
+	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion("us-east-1"),
 		config.WithEndpointResolverWithOptions(
 			aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
@@ -191,7 +196,7 @@ func main() {
 
 	client := sqs.NewFromConfig(cfg)
 
-	urlOut, err := client.GetQueueUrl(context.Background(), &sqs.GetQueueUrlInput{
+	urlOut, err := client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
 		QueueName: &queueName,
 	})
 	if err != nil {
@@ -200,27 +205,37 @@ func main() {
 	queueURL := urlOut.QueueUrl
 	log.Printf("polling %s", *queueURL)
 
+	var wg sync.WaitGroup
 	for {
-		out, err := client.ReceiveMessage(context.Background(), &sqs.ReceiveMessageInput{
+		out, err := client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 			QueueUrl:            queueURL,
 			MaxNumberOfMessages: 10,
 			WaitTimeSeconds:     20,
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
 			log.Printf("error receiving messages: %v", err)
 			continue
 		}
 
-		var wg sync.WaitGroup
 		for _, msg := range out.Messages {
 			wg.Add(1)
 			go func(msg sqstypes.Message) {
 				defer wg.Done()
-				if err := processMessage(client, queueURL, stages, msg); err != nil {
+				// WithoutCancel so an in-flight message completes its DB write
+				// even after the shutdown signal arrives.
+				msgCtx := context.WithoutCancel(ctx)
+				if err := processMessage(msgCtx, client, queueURL, stages, msg); err != nil {
 					log.Printf("message %s left on queue: %v", *msg.MessageId, err)
 				}
 			}(msg)
 		}
 		wg.Wait()
 	}
+
+	log.Println("shutdown signal received, waiting for in-flight messages")
+	wg.Wait()
+	log.Println("shutdown complete")
 }

@@ -12,9 +12,11 @@ DECISIONS.md in the repo root covering: your key architectural choices and which
 ## Patterns used and why
 - Interface for stage allows me to outlined structured nature of the lifestyle hooks
 - Stage setup is performed 
+- The added `msgCtx := context.WithoutCancel(ctx)` when processing the messages is an interesting choice. If the shutdown signal is received, do we opt to cancel the in-progress data and leave it on the queue, or finish the DB write and delete the message from the queue. AI is opting for the latter, but I'd almost rather the former. Leaving it on the queue is harmless since we have a data constraint on the message ID. It's possible as the flow expanded, we'd need to do additional cleanup for prior stages, and it would be more advantageous to let the process finish.
 
 ## Alternatives
 - Use a subquery query for points lookup
+- Current daemon is processing 100 plays in ~10 seconds. Is this speed really necessary? NFL plays, even during Sunday 1pm slot don't happen this fast. Could be an area for optimization.
 
 ## AI usage and tweaked output
 - Initially started with Hello World pipeline and blank processes, updated to mimic NFL Sunday with stat updates

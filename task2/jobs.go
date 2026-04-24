@@ -1,0 +1,340 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"math"
+	"net/http"
+	"strings"
+	"sync"
+	"time" // used by HTTPGetJob exponential backoff
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ses"
+	sestypes "github.com/aws/aws-sdk-go-v2/service/ses/types"
+)
+
+// ─── Status ───────────────────────────────────────────────────────────────────
+
+type Status string
+
+const (
+	Pending   Status = "PENDING"
+	Running   Status = "RUNNING"
+	Succeeded Status = "SUCCEEDED"
+	Failed    Status = "FAILED"
+	Cancelled Status = "CANCELLED"
+)
+
+// ─── Job interface ────────────────────────────────────────────────────────────
+
+type Job interface {
+	ID() string
+	Run(ctx context.Context, input any) (any, error)
+	GetStatus() Status
+	Cancel()
+}
+
+// ─── BaseJob ──────────────────────────────────────────────────────────────────
+
+type BaseJob struct {
+	id     string
+	status Status
+	mu     sync.RWMutex
+}
+
+func (b *BaseJob) ID() string { return b.id }
+
+func (b *BaseJob) GetStatus() Status {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.status
+}
+
+func (b *BaseJob) setStatus(s Status) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.status = s
+}
+
+func (b *BaseJob) Cancel() { b.setStatus(Cancelled) }
+
+// ─── NFL data types ───────────────────────────────────────────────────────────
+
+type NFLScores struct {
+	Week   int    `json:"week"`
+	Season int    `json:"season"`
+	Games  []Game `json:"games"`
+}
+
+type Game struct {
+	GameID   string   `json:"game_id"`
+	HomeTeam string   `json:"home_team"`
+	AwayTeam string   `json:"away_team"`
+	Players  []Player `json:"players"`
+}
+
+type Player struct {
+	Name     string      `json:"name"`
+	Team     string      `json:"team"`
+	Position string      `json:"position"`
+	Stats    PlayerStats `json:"stats"`
+}
+
+type PlayerStats struct {
+	PassingYards        int `json:"passing_yards"`
+	PassingTouchdowns   int `json:"passing_touchdowns"`
+	Interceptions       int `json:"interceptions"`
+	RushingYards        int `json:"rushing_yards"`
+	RushingTouchdowns   int `json:"rushing_touchdowns"`
+	ReceivingYards      int `json:"receiving_yards"`
+	ReceivingTouchdowns int `json:"receiving_touchdowns"`
+	Receptions          int `json:"receptions"`
+}
+
+// ─── Transformer result types ─────────────────────────────────────────────────
+
+type TransformerResult struct {
+	Week   int           `json:"week"`
+	Season int           `json:"season"`
+	Games  []GameSummary `json:"games"`
+}
+
+type GameSummary struct {
+	GameID   string                `json:"game_id"`
+	HomeTeam string                `json:"home_team"`
+	AwayTeam string                `json:"away_team"`
+	Players  []PlayerFantasyPoints `json:"players"`
+}
+
+type PlayerFantasyPoints struct {
+	Name     string  `json:"name"`
+	Team     string  `json:"team"`
+	Position string  `json:"position"`
+	Points   float64 `json:"fantasy_points"`
+}
+
+// ─── HTTP GET Job ─────────────────────────────────────────────────────────────
+
+type HTTPGetJob struct {
+	BaseJob
+	url    string
+	client *http.Client
+}
+
+func newHTTPGetJob(id, url string) *HTTPGetJob {
+	return &HTTPGetJob{
+		BaseJob: BaseJob{id: id, status: Pending},
+		url:     url,
+		client:  &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// Run fetches the URL, retrying with exponential backoff on any failure.
+func (j *HTTPGetJob) Run(ctx context.Context, _ any) (any, error) {
+	j.setStatus(Running)
+
+	const maxBackoff = 30 * time.Second
+	for attempt := 0; ; attempt++ {
+		data, err := j.fetch(ctx)
+		if err == nil {
+			j.setStatus(Succeeded)
+			return data, nil
+		}
+
+		backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+		log.Printf("[http_get] Attempt %d failed: %v — retrying in %v", attempt+1, err, backoff)
+
+		select {
+		case <-ctx.Done():
+			j.setStatus(Failed)
+			return nil, fmt.Errorf("context cancelled during retry: %w", ctx.Err())
+		case <-time.After(backoff):
+		}
+	}
+}
+
+func (j *HTTPGetJob) fetch(ctx context.Context) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, j.url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := j.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// ─── Stat Transformer Job ─────────────────────────────────────────────────────
+
+type StatTransformerJob struct {
+	BaseJob
+	scoring ScoringConfig
+}
+
+func newStatTransformerJob(id string, scoring ScoringConfig) *StatTransformerJob {
+	return &StatTransformerJob{
+		BaseJob: BaseJob{id: id, status: Pending},
+		scoring: scoring,
+	}
+}
+
+func (j *StatTransformerJob) Run(_ context.Context, input any) (any, error) {
+	j.setStatus(Running)
+
+	raw, ok := input.([]byte)
+	if !ok {
+		j.setStatus(Failed)
+		return nil, fmt.Errorf("expected []byte input, got %T", input)
+	}
+
+	var scores NFLScores
+	if err := json.Unmarshal(raw, &scores); err != nil {
+		j.setStatus(Failed)
+		return nil, fmt.Errorf("unmarshal NFL scores: %w", err)
+	}
+
+	result := TransformerResult{
+		Week:   scores.Week,
+		Season: scores.Season,
+		Games:  make([]GameSummary, 0, len(scores.Games)),
+	}
+
+	for _, game := range scores.Games {
+		summary := GameSummary{
+			GameID:   game.GameID,
+			HomeTeam: game.HomeTeam,
+			AwayTeam: game.AwayTeam,
+			Players:  make([]PlayerFantasyPoints, 0, len(game.Players)),
+		}
+		for _, p := range game.Players {
+			summary.Players = append(summary.Players, j.toFantasyPoints(p))
+		}
+		result.Games = append(result.Games, summary)
+	}
+
+	j.setStatus(Succeeded)
+	return result, nil
+}
+
+func (j *StatTransformerJob) toFantasyPoints(p Player) PlayerFantasyPoints {
+	sc := j.scoring
+	s := p.Stats
+	pts := 0.0
+	pts += float64(s.PassingYards) / sc.PassingYardsPerPoint
+	pts += float64(s.PassingTouchdowns) * sc.PassingTouchdownPoints
+	pts += float64(s.Interceptions) * sc.InterceptionPoints
+	pts += float64(s.RushingYards) / sc.RushingYardsPerPoint
+	pts += float64(s.RushingTouchdowns) * sc.RushingTouchdownPoints
+	pts += float64(s.ReceivingYards) / sc.ReceivingYardsPerPoint
+	pts += float64(s.ReceivingTouchdowns) * sc.ReceivingTouchdownPoints
+	return PlayerFantasyPoints{
+		Name:     p.Name,
+		Team:     p.Team,
+		Position: p.Position,
+		Points:   math.Round(pts*100) / 100,
+	}
+}
+
+// ─── Email Job ────────────────────────────────────────────────────────────────
+
+type EmailJob struct {
+	BaseJob
+	users       []User
+	sesClient   *ses.Client
+	fromAddress string
+}
+
+func newEmailJob(id string, users []User, sesClient *ses.Client, fromAddress string) *EmailJob {
+	return &EmailJob{
+		BaseJob:     BaseJob{id: id, status: Pending},
+		users:       users,
+		sesClient:   sesClient,
+		fromAddress: fromAddress,
+	}
+}
+
+// Run emails all users concurrently via SES, waiting for all goroutines to finish.
+func (j *EmailJob) Run(ctx context.Context, input any) (any, error) {
+	j.setStatus(Running)
+
+	result, ok := input.(TransformerResult)
+	if !ok {
+		j.setStatus(Failed)
+		return nil, fmt.Errorf("expected TransformerResult input, got %T", input)
+	}
+
+	subject := fmt.Sprintf("Fantasy Football Results — Week %d, %d Season", result.Week, result.Season)
+	body := formatEmailBody(result)
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+	for _, u := range j.users {
+		wg.Add(1)
+		go func(user User) {
+			defer wg.Done()
+			if err := j.sendEmail(ctx, user, subject, body); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("send to %s: %w", user.Email, err))
+				mu.Unlock()
+			}
+		}(u)
+	}
+	wg.Wait()
+
+	if len(errs) > 0 {
+		j.setStatus(Failed)
+		return nil, errs[0]
+	}
+	j.setStatus(Succeeded)
+	return nil, nil
+}
+
+func (j *EmailJob) sendEmail(ctx context.Context, u User, subject, body string) error {
+	_, err := j.sesClient.SendEmail(ctx, &ses.SendEmailInput{
+		Source: aws.String(j.fromAddress),
+		Destination: &sestypes.Destination{
+			ToAddresses: []string{u.Email},
+		},
+		Message: &sestypes.Message{
+			Subject: &sestypes.Content{Data: aws.String(subject)},
+			Body: &sestypes.Body{
+				Text: &sestypes.Content{Data: aws.String(body)},
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	log.Printf("[emailer] ✉  Sent to %s <%s>", u.Name, u.Email)
+	return nil
+}
+
+func formatEmailBody(r TransformerResult) string {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "Fantasy Football Results — Week %d, %d Season\n", r.Week, r.Season)
+	fmt.Fprintln(&buf, strings.Repeat("─", 60))
+	for _, game := range r.Games {
+		fmt.Fprintf(&buf, "\n%s vs %s\n", game.HomeTeam, game.AwayTeam)
+		for _, p := range game.Players {
+			fmt.Fprintf(&buf, "  %-25s (%-2s, %s)  %6.2f pts\n",
+				p.Name, p.Position, p.Team, p.Points)
+		}
+	}
+	return buf.String()
+}

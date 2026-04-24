@@ -1,0 +1,27 @@
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "8081:80"
+    volumes:
+      - ./nginx/nfl_scores.json:/usr/share/nginx/html/nfl_scores.json:ro
+
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=ses
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      # Normally wouldn't commit secrets, but in the interest of allowing others to run this...
+      - LOCALSTACK_AUTH_TOKEN=ls-qopAVazo-3352-WEyu-nEqU-DUWAdOsuf48e
+    volumes:
+      - "./init-scripts:/etc/localstack/init/ready.d"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "awslocal", "ses", "get-send-quota"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

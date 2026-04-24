@@ -1,0 +1,157 @@
+{
+  "week": 1,
+  "season": 2024,
+  "games": [
+    {
+      "game_id": "2024-09-05-KC-BAL",
+      "home_team": "Kansas City Chiefs",
+      "away_team": "Baltimore Ravens",
+      "final_score": { "home": 27, "away": 20 },
+      "players": [
+        {
+          "name": "Patrick Mahomes",
+          "team": "Kansas City Chiefs",
+          "position": "QB",
+          "stats": {
+            "passing_yards": 291,
+            "passing_touchdowns": 2,
+            "interceptions": 0,
+            "rushing_yards": 22,
+            "rushing_touchdowns": 0,
+            "receiving_yards": 0,
+            "receiving_touchdowns": 0,
+            "receptions": 0
+          }
+        },
+        {
+          "name": "Isiah Pacheco",
+          "team": "Kansas City Chiefs",
+          "position": "RB",
+          "stats": {
+            "passing_yards": 0,
+            "passing_touchdowns": 0,
+            "interceptions": 0,
+            "rushing_yards": 89,
+            "rushing_touchdowns": 1,
+            "receiving_yards": 18,
+            "receiving_touchdowns": 0,
+            "receptions": 2
+          }
+        },
+        {
+          "name": "Travis Kelce",
+          "team": "Kansas City Chiefs",
+          "position": "TE",
+          "stats": {
+            "passing_yards": 0,
+            "passing_touchdowns": 0,
+            "interceptions": 0,
+            "rushing_yards": 0,
+            "rushing_touchdowns": 0,
+            "receiving_yards": 67,
+            "receiving_touchdowns": 1,
+            "receptions": 5
+          }
+        },
+        {
+          "name": "Lamar Jackson",
+          "team": "Baltimore Ravens",
+          "position": "QB",
+          "stats": {
+            "passing_yards": 237,
+            "passing_touchdowns": 1,
+            "interceptions": 1,
+            "rushing_yards": 44,
+            "rushing_touchdowns": 1,
+            "receiving_yards": 0,
+            "receiving_touchdowns": 0,
+            "receptions": 0
+          }
+        },
+        {
+          "name": "Derrick Henry",
+          "team": "Baltimore Ravens",
+          "position": "RB",
+          "stats": {
+            "passing_yards": 0,
+            "passing_touchdowns": 0,
+            "interceptions": 0,
+            "rushing_yards": 112,
+            "rushing_touchdowns": 1,
+            "receiving_yards": 8,
+            "receiving_touchdowns": 0,
+            "receptions": 1
+          }
+        }
+      ]
+    },
+    {
+      "game_id": "2024-09-08-SF-NYJ",
+      "home_team": "San Francisco 49ers",
+      "away_team": "New York Jets",
+      "final_score": { "home": 32, "away": 19 },
+      "players": [
+        {
+          "name": "Brock Purdy",
+          "team": "San Francisco 49ers",
+          "position": "QB",
+          "stats": {
+            "passing_yards": 274,
+            "passing_touchdowns": 3,
+            "interceptions": 0,
+            "rushing_yards": 8,
+            "rushing_touchdowns": 0,
+            "receiving_yards": 0,
+            "receiving_touchdowns": 0,
+            "receptions": 0
+          }
+        },
+        {
+          "name": "Christian McCaffrey",
+          "team": "San Francisco 49ers",
+          "position": "RB",
+          "stats": {
+            "passing_yards": 0,
+            "passing_touchdowns": 0,
+            "interceptions": 0,
+            "rushing_yards": 134,
+            "rushing_touchdowns": 2,
+            "receiving_yards": 41,
+            "receiving_touchdowns": 0,
+            "receptions": 4
+          }
+        },
+        {
+          "name": "Aaron Rodgers",
+          "team": "New York Jets",
+          "position": "QB",
+          "stats": {
+            "passing_yards": 188,
+            "passing_touchdowns": 1,
+            "interceptions": 2,
+            "rushing_yards": 5,
+            "rushing_touchdowns": 0,
+            "receiving_yards": 0,
+            "receiving_touchdowns": 0,
+            "receptions": 0
+          }
+        },
+        {
+          "name": "Breece Hall",
+          "team": "New York Jets",
+          "position": "RB",
+          "stats": {
+            "passing_yards": 0,
+            "passing_touchdowns": 0,
+            "interceptions": 0,
+            "rushing_yards": 76,
+            "rushing_touchdowns": 0,
+            "receiving_yards": 52,
+            "receiving_touchdowns": 1,
+            "receptions": 6
+          }
+        }
+      ]
+    }
+  ]
+}

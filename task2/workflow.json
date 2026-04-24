@@ -1,0 +1,43 @@
+{
+  "workflow": {
+    "name": "TMRW",
+    "description": "Fantasy Football Tuesday Morning Results Workflow"
+  },
+  "jobs": [
+    {
+      "id": "http_get",
+      "type": "http_get",
+      "url": "http://localhost:8081/nfl_scores.json",
+      "dependencies": []
+    },
+    {
+      "id": "stat_transformer",
+      "type": "stat_transformer",
+      "dependencies": ["http_get"]
+    },
+    {
+      "id": "emailer",
+      "type": "emailer",
+      "dependencies": ["stat_transformer"]
+    }
+  ],
+  "scoring": {
+    "passing_yards_per_point": 25,
+    "passing_touchdown_points": 4,
+    "interception_points": -2,
+    "rushing_yards_per_point": 10,
+    "rushing_touchdown_points": 6,
+    "receiving_yards_per_point": 10,
+    "receiving_touchdown_points": 6
+  },
+  "users": [
+    { "name": "Alice Johnson", "email": "alice@example.com" },
+    { "name": "Bob Smith",     "email": "bob@example.com" },
+    { "name": "Charlie Davis", "email": "charlie@example.com" }
+  ],
+  "email_service": {
+    "from_address": "noreply@tmrw.example.com",
+    "ses_endpoint": "http://localhost:4566",
+    "region":       "us-east-1"
+  }
+}

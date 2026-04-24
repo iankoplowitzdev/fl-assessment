@@ -11,6 +11,7 @@ ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS game_plays (
     id                        SERIAL PRIMARY KEY,
+    sqs_message_id            VARCHAR(100) NOT NULL UNIQUE,
     game_id                   VARCHAR(50)  NOT NULL,
     primary_player_name       VARCHAR(100) NOT NULL,
     primary_player_position   VARCHAR(10)  NOT NULL,

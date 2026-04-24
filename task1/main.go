@@ -36,6 +36,7 @@ type Message struct {
 	Touchdown       bool      `json:"touchdown"`
 	StatType        string    `json:"stat_type"`
 	Score           GameScore `json:"score"`
+	SQSMessageID    string    `json:"-"`
 	FantasyPoints   float64   `json:"-"`
 }
 
@@ -44,6 +45,7 @@ func processMessage(client *sqs.Client, queueURL *string, stages []Stage, msg sq
 	if err := json.Unmarshal([]byte(*msg.Body), &payload); err != nil {
 		return err
 	}
+	payload.SQSMessageID = *msg.MessageId
 
 	for _, s := range stages {
 		if err := s.Setup(); err != nil {
@@ -64,11 +66,35 @@ func processMessage(client *sqs.Client, queueURL *string, stages []Stage, msg sq
 	return err
 }
 
+func loadScoringRules(db *sql.DB) map[string]scoringRule {
+	rows, err := db.Query(`SELECT stat_type, points_per_yard, touchdown_points FROM stat_scoring_rules`)
+	if err != nil {
+		log.Fatalf("failed to load scoring rules: %v", err)
+	}
+	defer rows.Close()
+
+	rules := make(map[string]scoringRule)
+	for rows.Next() {
+		var statType string
+		var rule scoringRule
+		if err := rows.Scan(&statType, &rule.PointsPerYard, &rule.TouchdownPoints); err != nil {
+			log.Fatalf("failed to scan scoring rule: %v", err)
+		}
+		rules[statType] = rule
+	}
+	if err := rows.Err(); err != nil {
+		log.Fatalf("error iterating scoring rules: %v", err)
+	}
+	log.Printf("loaded %d scoring rules", len(rules))
+	return rules
+}
+
 func buildStageRegistry(db *sql.DB) map[string]Stage {
+	rules := loadScoringRules(db)
 	return map[string]Stage{
-		"SCHEMA_VALIDATION":        &SchemaValidationStage{},
-		"FANTASY_POINT_TRANSLATION": &FantasyPointTranslationStage{db: db},
-		"DATABASE_PERSISTENCE":     &DatabasePersistenceStage{db: db},
+		"SCHEMA_VALIDATION":         &SchemaValidationStage{},
+		"FANTASY_POINT_TRANSLATION": &FantasyPointTranslationStage{rules: rules},
+		"DATABASE_PERSISTENCE":      &DatabasePersistenceStage{db: db},
 	}
 }
 
@@ -126,6 +152,10 @@ func connectDB() *sql.DB {
 	if err != nil {
 		log.Fatalf("failed to connect to DB after retries: %v", err)
 	}
+
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(5 * time.Minute)
 
 	log.Println("connected to database")
 	return db

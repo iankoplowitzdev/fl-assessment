@@ -51,8 +51,13 @@ func (s *SchemaValidationStage) Teardown() error {
 	return nil
 }
 
+type scoringRule struct {
+	PointsPerYard   float64
+	TouchdownPoints float64
+}
+
 type FantasyPointTranslationStage struct {
-	db *sql.DB
+	rules map[string]scoringRule
 }
 
 func (s *FantasyPointTranslationStage) Setup() error {
@@ -61,18 +66,14 @@ func (s *FantasyPointTranslationStage) Setup() error {
 }
 
 func (s *FantasyPointTranslationStage) Process(msg *Message) error {
-	var pointsPerYard, touchdownPoints float64
-	err := s.db.QueryRow(
-		`SELECT points_per_yard, touchdown_points FROM stat_scoring_rules WHERE stat_type = $1`,
-		msg.StatType,
-	).Scan(&pointsPerYard, &touchdownPoints)
-	if err != nil {
-		return fmt.Errorf("scoring rule lookup for %q: %w", msg.StatType, err)
+	rule, ok := s.rules[msg.StatType]
+	if !ok {
+		return fmt.Errorf("no scoring rule for stat_type %q", msg.StatType)
 	}
 
-	points := float64(msg.Yards) * pointsPerYard
+	points := float64(msg.Yards) * rule.PointsPerYard
 	if msg.Touchdown {
-		points += touchdownPoints
+		points += rule.TouchdownPoints
 	}
 	msg.FantasyPoints = points
 
@@ -102,15 +103,18 @@ func (s *DatabasePersistenceStage) Process(msg *Message) error {
 		secondaryPosition = sql.NullString{String: msg.SecondaryPlayer.Position, Valid: true}
 	}
 
-	_, err := s.db.Exec(`
+	result, err := s.db.Exec(`
 		INSERT INTO game_plays (
+			sqs_message_id,
 			game_id,
 			primary_player_name, primary_player_position,
 			secondary_player_name, secondary_player_position,
 			yards, touchdown, stat_type,
 			home_team, away_team,
 			fantasy_points
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		ON CONFLICT (sqs_message_id) DO NOTHING`,
+		msg.SQSMessageID,
 		msg.GameID,
 		msg.PrimaryPlayer.Name, msg.PrimaryPlayer.Position,
 		secondaryName, secondaryPosition,
@@ -121,8 +125,13 @@ func (s *DatabasePersistenceStage) Process(msg *Message) error {
 	if err != nil {
 		return fmt.Errorf("failed to persist play: %w", err)
 	}
-	log.Printf("DatabasePersistenceStage: saved game_id=%s player=%s fantasy_points=%.2f",
-		msg.GameID, msg.PrimaryPlayer.Name, msg.FantasyPoints)
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		log.Printf("DatabasePersistenceStage: duplicate sqs_message_id=%s skipped", msg.SQSMessageID)
+	} else {
+		log.Printf("DatabasePersistenceStage: saved game_id=%s player=%s fantasy_points=%.2f",
+			msg.GameID, msg.PrimaryPlayer.Name, msg.FantasyPoints)
+	}
 	return nil
 }
 
